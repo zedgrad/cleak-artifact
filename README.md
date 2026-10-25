@@ -18,7 +18,7 @@ here.
 | Path | What it is |
 |---|---|
 | [`PROMPTS.md`](PROMPTS.md) | Every prompt the system sends, by pipeline stage, with the exact output schema each one must satisfy. See the note on language below. |
-| [`configs/*.yaml`](configs/) | The nine baseline configurations B1–B7, exactly as the sweep consumed them. |
+| [`configs/*.yaml`](configs/) | The nine baseline configurations B1–B7. Their capability flags are unchanged since the reported sweep; only B7's filename and prose description were revised afterwards. |
 
 ### A note on language
 
@@ -61,21 +61,38 @@ paper reports as mean ± std over three repetitions.
 
 ## Runtime settings held constant across the reported sweeps
 
-| Setting | Value |
-|---|---|
-| Model (main sweeps) | `deepseek-v4-flash`, via an OpenAI-compatible gateway |
-| Model (label-masking ablation) | `deepseek-v4.1-flash`, same gateway |
-| Temperature (planner and judge) | 0 |
-| Max output tokens | 16,384 |
-| Output mode | JSON-constrained |
-| Heuristic judge bands | 0.7 / 0.4 |
-| LLM-escalation borderline window | [0.35, 0.7] |
-| Consensus (when enabled) | K = 3, confidence-weighted, down-weight 0.3, veto at 0.75 |
-| Repetitions per LLM-assisted configuration | 3 |
+Each run's stored provenance records the provider, the model name and the
+temperature. The remaining settings below live in the scanner's configuration
+and are not written into per-run provenance, so they are reported as the
+defaults in force rather than as per-run facts.
+
+| Setting | Value | Recorded per run? |
+|---|---|---|
+| Model (main sweeps) | `deepseek-v4-flash`, via an OpenAI-compatible gateway | yes |
+| Model (label-masking ablation) | `deepseek-v4.1-flash`, same gateway | yes |
+| Temperature (planner and judge) | 0 | yes |
+| Output mode | JSON-constrained | no |
+| Heuristic judge bands | 0.7 / 0.4 | no (fixed in source) |
+| LLM-escalation borderline window | [0.35, 0.7] | no (fixed in source) |
+| Consensus (when enabled) | K = 3, confidence-weighted, down-weight 0.3, veto at 0.75 | yes |
+| Repetitions per LLM-assisted configuration | 3 | yes |
 
 The gateway exposes model aliases rather than provider-side snapshot
 identifiers, so the paper reports the two aliases above and does not claim a
 pinned snapshot.
+
+## Prompt provenance, and one framing difference worth knowing
+
+The nine-rule judge rubric published here is **byte-identical** to the one in
+force at the commit that produced the reported sweep. What changed in the
+code afterwards is the surrounding machinery, not the rubric.
+
+That machinery matters in one place. The main sweeps sent **one bundle per
+request** under the single-bundle system prompt (§3.2). The label-masking
+ablation ran later and used the **batch** system prompt (§4), with a chunk
+size of one. The two ablation legs are therefore comparable with each other,
+but neither is directly comparable with the main ablation table. The paper
+states this.
 
 ## Label masking
 
