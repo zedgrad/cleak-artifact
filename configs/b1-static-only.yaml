@@ -1,0 +1,12 @@
+# B1 — Static analysis only (standalone static analyzer, heuristic verdict).
+id: B1
+name: Static only
+description: >-
+  Standalone static analysis (candidateScan + deterministic heuristic judge).
+  No dynamic stage, no LLM. Lower bound for the static path.
+capabilities:
+  static: true
+  dynamic: false
+  planner: false
+  tool_selector: false
+  fusion: false

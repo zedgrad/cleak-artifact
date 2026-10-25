@@ -1,0 +1,15 @@
+# B4 — LLM + static analysis (deterministic static evidence, LLM judge on borderline).
+id: B4
+name: LLM + static
+description: >-
+  Static evidence gathered deterministically (enrichStaticEvidence, no agentic tool
+  selection), then fused by the LLM judge on borderline bundles. Isolates the value
+  of LLM reasoning over static-only evidence.
+capabilities:
+  static: true
+  dynamic: false
+  planner: false
+  tool_selector: false
+  fusion: true
+consensusN: 1
+runs: 3

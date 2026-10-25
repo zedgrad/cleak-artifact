@@ -1,0 +1,14 @@
+# B6a — Isolation: B6 + planner only (adaptive planning, still no agentic tool selection).
+id: B6a
+name: + planner only
+description: >-
+  B6 plus the LLM strategist (adaptive planning), but tool execution stays a
+  deterministic recipe. Isolates the contribution of the planner axis on its own.
+capabilities:
+  static: true
+  dynamic: true
+  planner: true
+  tool_selector: false
+  fusion: true
+consensusN: 1
+runs: 3

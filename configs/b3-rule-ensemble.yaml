@@ -1,0 +1,12 @@
+# B3 — Rule-based static + dynamic ensemble (deterministic merge, no LLM).
+id: B3
+name: Rule-based ensemble
+description: >-
+  Static and dynamic evidence merged by the deterministic heuristic judge (no LLM
+  reasoning). Tests whether simply combining analyzers helps without an LLM.
+capabilities:
+  static: true
+  dynamic: true
+  planner: false
+  tool_selector: false
+  fusion: false

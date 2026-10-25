@@ -1,0 +1,14 @@
+# B6b — Isolation: B6 + tool_selector only (agentic tool selection, no adaptive planner).
+id: B6b
+name: + tool_selector only
+description: >-
+  B6 plus agentic tool selection (the LLM picks tools step-by-step), but no upfront
+  strategist. Isolates the contribution of the tool-selector axis on its own.
+capabilities:
+  static: true
+  dynamic: true
+  planner: false
+  tool_selector: true
+  fusion: true
+consensusN: 1
+runs: 3

@@ -1,0 +1,15 @@
+# B6 — LLM + all tools, no planner / no tool-selector (deterministic recipe + LLM fusion).
+id: B6
+name: LLM + all (no planner/selector)
+description: >-
+  All tools run via a fixed deterministic recipe (no adaptive planning, no agentic
+  tool selection), then the LLM fuses the heterogeneous evidence. Tests whether
+  "run everything + summarize with an LLM" is sufficient.
+capabilities:
+  static: true
+  dynamic: true
+  planner: false
+  tool_selector: false
+  fusion: true
+consensusN: 1
+runs: 3

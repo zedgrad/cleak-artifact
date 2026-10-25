@@ -1,0 +1,13 @@
+# B2 — Dynamic analysis only (leaks discovered from sanitizer stacks, no static discovery).
+id: B2
+name: Dynamic only
+description: >-
+  Standalone dynamic analysis (build + LSan/Valgrind). Candidates are synthesized
+  from the runtime leak stacks alone — no static candidateScan. Requires a runnable
+  corpus.
+capabilities:
+  static: false
+  dynamic: true
+  planner: false
+  tool_selector: false
+  fusion: false

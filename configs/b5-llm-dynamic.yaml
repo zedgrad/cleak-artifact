@@ -1,0 +1,14 @@
+# B5 — LLM + dynamic analysis (dynamic-only discovery, LLM judge on borderline).
+id: B5
+name: LLM + dynamic
+description: >-
+  Dynamic-only discovery (sanitizer stacks) fused by the LLM judge. Isolates the
+  value of LLM reasoning over dynamic-only evidence. Requires a runnable corpus.
+capabilities:
+  static: false
+  dynamic: true
+  planner: false
+  tool_selector: false
+  fusion: true
+consensusN: 1
+runs: 3

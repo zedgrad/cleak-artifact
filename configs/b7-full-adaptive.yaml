@@ -1,0 +1,16 @@
+# B7 — Full adaptive LLM orchestrator (planner + tool selector + all tools + fusion).
+id: B7
+name: Full adaptive
+description: >-
+  The full adaptive configuration: LLM strategist plans, the agent adaptively selects
+  tools over MCP, static + dynamic evidence is gathered, and the LLM fuses it into the
+  final verdict. Combines every ablation axis at once — one point in the grid, not
+  necessarily the best-performing one (compare against B6/B6a/B6b in docs/EVALUATION.md).
+capabilities:
+  static: true
+  dynamic: true
+  planner: true
+  tool_selector: true
+  fusion: true
+consensusN: 1
+runs: 3
