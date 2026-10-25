@@ -1,81 +1,96 @@
-# Danh mục Prompt LLM (leak-inspector-tui)
+# LLM prompt catalogue (leak-inspector-tui)
 
-> Tài liệu này tổng hợp **mọi prompt / instruction text** mà hệ thống gửi cho LLM trong
-> đường (path) **`leak-inspector-tui`** — đường điều phối **native tool-calling** đang chạy
-> thật: system prompt, user message, **mô tả tool** (với native tool-calling, phần
-> `description` của mỗi tool cũng đi vào schema gửi cho model), và các *notice* được chèn vào
-> hội thoại. Phần diễn giải bằng tiếng Việt; **prompt gốc giữ nguyên văn tiếng Anh** đúng như
-> trong source. Mỗi mục ghi rõ `file:dòng` — **source code mới là nguồn chân lý**, nếu sửa
-> prompt hãy cập nhật cả file này.
+> This document collects **every prompt and instruction text** the system sends
+> to an LLM on the **`leak-inspector-tui`** path, which is the **native
+> tool-calling** orchestration path that actually runs: system prompts, user
+> messages, **tool descriptions** (under native tool-calling each tool's
+> `description` also goes into the schema sent to the model), and the *notices*
+> injected into the conversation. The commentary is ours; **the prompts
+> themselves are reproduced verbatim** as they appear in the source. Every entry
+> cites `file:line` — **the source code is the authority**, so if a prompt
+> changes, update this file too.
 >
-> **Phạm vi:** chỉ tài liệu hoá path TUI. Đường web (`control-plane`, JSON-action
-> orchestrator) **đã được gỡ khỏi hệ thống** nên không còn ở đây.
->
-> Xem thêm: [ARCHITECTURE.md](./ARCHITECTURE.md) · [EVALUATION.md](./EVALUATION.md) ·
-> [sequence-diagrams.md](./sequence-diagrams.md)
+> **Scope:** the TUI path only. The web path (`control-plane`, the JSON-action
+> orchestrator) **has been removed from the system** and is no longer documented
+> here.
 
 ---
 
-## 0. Tổng quan — pipeline 4 tầng và nơi LLM được gọi
+## 0. Overview — the four-tier pipeline and where the LLM is called
 
-Path TUI **không** phải một agent tự do gọi mọi tool. Nó là một **workflow đa-agent theo
-tầng**, định nghĩa ở `apps/leak-inspector-tui/src/orchestrator/workflowInvestigation.ts`.
+The TUI path is **not** an agent free to call any tool. It is a **tiered
+multi-agent workflow**, defined in
+`apps/leak-inspector-tui/src/orchestrator/workflowInvestigation.ts`.
 
-LLM được gọi ở hai nơi: (1) **tầng POLICY host-side** TRƯỚC pipeline (2 prompt one-shot:
-allocator-profiler, strategist — xem §0.5), và (2) **investigation 4-tầng** (Stage A,
-Stage B-khi-cần, Stage D). Stage C + hợp nhất bằng chứng là **tất định, không LLM**. Mọi prompt POLICY
-là one-shot temp-0, output **verify (grep/clamp) + cache**, và **bỏ qua trong benchmark** (manifest đông
-cứng) ⇒ eval tất định.
+The LLM is called in two places: (1) the **host-side POLICY tier** that runs
+BEFORE the pipeline (two one-shot prompts, the allocator profiler and the
+strategist — see §0.5), and (2) the **four-tier investigation** (Stage A, Stage
+B when needed, Stage D). Stage C and evidence merging are **deterministic, with
+no LLM**. Every POLICY prompt is one-shot at temperature 0, its output is
+**verified (grep/clamp) and cached**, and it is **skipped in the benchmark**
+(the manifest is frozen), so evaluation stays deterministic.
 
-| Tầng | Việc | LLM? | Prompt |
+| Tier | Job | LLM? | Prompt |
 |---|---|---|---|
-| **A · Static fan-out** | nhiều **static sub-agent**, mỗi cái nhận một nhóm candidate, chạy tool tĩnh để **gom bằng chứng** — **không ra verdict** | ✅ | `staticSubAgentSystemPrompt` |
-| **B · Dynamic** | nếu biết `buildCommand` → **công thức tất định, KHÔNG LLM** (`buildTarget → lsanRun`); nếu không → **1 dynamic worker (LLM)** build + chạy sanitizer | ⚙️/✅ | `dynamicWorkerSystemPrompt` |
-| **C · Synthesize** | hợp nhất static context + dynamic evidence, đóng dấu coverage | ❌ | — |
-| **D · Hybrid judge** | heuristic (tất định) cho **mọi** bundle; **LLM judge** chỉ cho bundle **borderline**, gộp theo lô (≤12/call); **consensus** (k mẫu, batch theo round) tuỳ chọn | ✅ | `llmJudge` BATCH_SYSTEM_PROMPT |
+| **A · Static fan-out** | several **static sub-agents**, each given one group of candidates, running static tools to **gather evidence** — they do **not** return a verdict | ✅ | `staticSubAgentSystemPrompt` |
+| **B · Dynamic** | with a known `buildCommand` → **deterministic recipe, NO LLM** (`buildTarget → lsanRun`); otherwise → **one dynamic worker (LLM)** builds and runs the sanitizer | ⚙️/✅ | `dynamicWorkerSystemPrompt` |
+| **C · Synthesize** | merge static context with dynamic evidence, stamp coverage | ❌ | — |
+| **D · Hybrid judge** | heuristic (deterministic) for **every** bundle; the **LLM judge** only for **borderline** bundles, batched (≤12 per call); **consensus** (k samples, batched per round) optional | ✅ | `llmJudge` BATCH_SYSTEM_PROMPT |
 
-Đặc điểm cốt lõi:
-- **Phân vùng tool cứng:** static sub-agent chỉ nhận tool tĩnh; dynamic worker chỉ nhận tool
-  động → LLM **không thể nhảy chéo** static↔dynamic. Thứ tự A–B chạy **song song**
-  (`Promise.all`, `workflowInvestigation.ts:282`).
-- **Bằng chứng được capture TỰ ĐỘNG:** static context và dynamic finding do code bắt
-  (`withStaticContextCapture` / `withDynamicEvidenceCapture`), model **không** tự ghi.
-- **Verdict do code ghi**, không qua LLM tool-call. Mọi lỗi gọi/parse model ở bất kỳ tầng nào
-  → **rớt về heuristic** (an toàn, không tệ hơn).
-- **Cờ `toolSelect`** (`opts.toolSelect`, mặc định `true`): khi `false`, Stage A bỏ qua agentic
-  sub-agent, chỉ chạy deterministic enrichment (stage `enrich` của `scanController`); Stage B
-  chạy deterministic recipe (nếu có) hoặc skip — không có LLM worker fallback. Stage D vẫn chạy
-  LLM judge cho borderline (độc lập với toolSelect).
-- **Cờ `dynamicAlreadyRan`** (`ctx.dynamicAlreadyRan`): khi dynamic-only discovery đã chạy
-  trước (static=false, dynamic selective/aggressive), Stage B bỏ qua vì bằng chứng động đã
-  được gắn vào bundle.
+The defining properties:
 
-**Provider dispatch** — `packages/agent-core/src/providers/index.ts:23-31`: `provider ===
-'anthropic'` → `callAnthropic`, còn lại (`local` / `openai` / `openai-compat`) →
-`callOpenAiChat`. Cách giao system prompt: Anthropic đặt ở tham số top-level `system`
-(`providers/anthropic.ts:29`); OpenAI-compatible chèn làm message đầu `{role:'system',
-content}` (`providers/normalize.ts:41`). Mặc định thesis: gateway OpenAI-compatible nội bộ
-`local`, model `deepseek-v4-flash-0731` tại `localhost:20128/v1` (host-aware) — `config.ts:105-166`.
+- **Hard tool partitioning:** static sub-agents receive only static tools, the
+  dynamic worker only dynamic ones, so the LLM **cannot cross** from static to
+  dynamic or back. Stages A and B run **concurrently** (`Promise.all`,
+  `workflowInvestigation.ts:282`).
+- **Evidence is captured AUTOMATICALLY:** static context and dynamic findings are
+  recorded by code (`withStaticContextCapture` / `withDynamicEvidenceCapture`);
+  the model does **not** write them itself.
+- **Verdicts are written by code**, not through an LLM tool call. A model-call or
+  parse failure at any tier **falls back to the heuristic** verdict, so the
+  system is never worse than its deterministic core.
+- **The `toolSelect` flag** (`opts.toolSelect`, default `true`): when `false`,
+  Stage A skips the agentic sub-agent and runs deterministic enrichment only
+  (`scanController`'s `enrich` stage), and Stage B runs the deterministic recipe
+  if one is available or skips, with no LLM worker fallback. Stage D still runs
+  the LLM judge on borderline bundles, independently of `toolSelect`.
+- **The `dynamicAlreadyRan` flag** (`ctx.dynamicAlreadyRan`): when dynamic-only
+  discovery has already run (static=false, dynamic selective/aggressive), Stage B
+  is skipped because the dynamic evidence is already attached to the bundles.
+
+**Provider dispatch** — `packages/agent-core/src/providers/index.ts:23-31`:
+`provider === 'anthropic'` → `callAnthropic`, everything else (`local` /
+`openai` / `openai-compat`) → `callOpenAiChat`. The system prompt is delivered
+differently per provider: Anthropic takes it as the top-level `system` parameter
+(`providers/anthropic.ts:29`), while OpenAI-compatible endpoints receive it as
+the first message, `{role:'system', content}` (`providers/normalize.ts:41`).
 
 ---
 
-## 0.5. Tầng POLICY (host-side, one-shot, TRƯỚC investigation)
+## 0.5. The POLICY tier (host-side, one-shot, BEFORE investigation)
 
-Hai prompt khám-phá-theo-project, đều: *gather host-side → one-shot `callModel` (temp 0) → parse Zod
-lenient (kiểu `parseVerdict`) → **verify** → cache `<repo>/.cleak/`*. Resolve ở `surfaces/headless.ts`.
-**Bỏ qua khi allocators được cấp tường minh** (eval) ⇒ tất định.
+Two per-project discovery prompts. Both follow the same shape: *gather host-side
+→ one-shot `callModel` at temperature 0 → lenient Zod parse (like `parseVerdict`)
+→ **verify** → cache under `<repo>/.cleak/`*. They are resolved in
+`surfaces/headless.ts` and **skipped when allocators are supplied explicitly**
+(as in the evaluation), which is what keeps evaluation deterministic.
 
 ### 0.5.1. Allocator profiler — `allocatorProfileSystemPrompt`
 
 - **File:** `apps/leak-inspector-tui/src/domain/allocatorProfiler.ts:90-103`
 
-Đọc header (đầy đủ) + source (cắt) → liệt kê **API cấp phát/giải phóng custom** của project (factory
-`*_new/*_create/*_dup`, parser/printer trả owned, macro `#define ALLOC`, smart-ptr `make_unique`) +
-`ownershipNotes` (quy ước sở hữu: transfer/borrow/refcount/pool, "Delete bỏ qua const"…). Output JSON
-`{allocators, deallocators, reallocators, ownershipNotes, confidence, explanation}`. **Verify:** chỉ giữ
-tên là identifier hợp lệ, KHÔNG phải libc, và **thực sự xuất hiện** trong source đã đưa cho model
-(`verifyNames`, chống hallucinate). Đo độ chính xác bằng `scripts/validate-allocator-profile.ts` (P/R/F1
-so ground-truth). → nạp `extraAllocators/Deallocators` + `ownershipNotes`.
+Reads the headers (in full) and the sources (truncated), then lists the
+project's **custom allocation and deallocation APIs** (factories such as
+`*_new`/`*_create`/`*_dup`, parsers and printers that return owned memory,
+`#define ALLOC` macros, smart-pointer helpers like `make_unique`) together with
+`ownershipNotes` (ownership conventions: transfer, borrow, refcount, pool,
+"Delete skips const", and so on). The output is JSON
+`{allocators, deallocators, reallocators, ownershipNotes, confidence, explanation}`.
+**Verification:** a name is kept only if it is a valid identifier, is not libc,
+and **actually appears** in the source that was shown to the model
+(`verifyNames`, the anti-hallucination check). Accuracy is measured by
+`scripts/validate-allocator-profile.ts` (P/R/F1 against ground truth). The result
+feeds `extraAllocators`/`extraDeallocators` and `ownershipNotes`.
 
 ```text
 You are a C/C++ memory-management API analyst. Given header/source excerpts from ONE project, identify that project's CUSTOM allocation and deallocation functions — the wrappers/replacements for malloc/free: factory constructors and duplicators (`*_new`, `*_create*`, `*_alloc*`, `*_dup`, `*_clone`, `*_copy` that return owned memory) and their matching releases (`*_free`, `*_delete`, `*_destroy`, `*_release`, `*_unref`, `*_close`, pool/arena destructors) — plus any ownership conventions a leak checker must know.
@@ -96,9 +111,12 @@ Rules:
 
 - **File:** `apps/leak-inspector-tui/src/domain/strategist.ts:72-80`
 
-Đọc metadata repo (số file, tỉ lệ C++, có build-system?, mật độ smart-ptr) + tóm tắt profile → chọn
-`{runDynamic, judge: single|consensus, staticDepth: shallow|full}`. v0 wire `runDynamic` (bỏ stage dynamic
-khi không build được). **Fallback rule-based tất định** khi LLM lỗi. OPT-IN `--strategy auto`.
+Reads repository metadata (file count, share of C++, whether a build system is
+present, smart-pointer density) plus a summary of the allocator profile, and
+chooses `{runDynamic, judge: single|consensus, staticDepth: shallow|full}`. In
+v0 only `runDynamic` is wired (it skips the dynamic stage when the project
+cannot be built). A **deterministic rule-based fallback** takes over whenever the
+model call fails. Opt-in via `--strategy auto`.
 
 ```text
 You are the STRATEGIST for a C/C++ memory-leak analyzer. Given a project's metadata + memory-API profile, choose an analysis plan by SELECTING among the engine's existing deterministic capabilities — you do not invent analysis. Respond with a JSON object ONLY:
@@ -114,14 +132,15 @@ Be decisive; prefer cheaper plans when they lose no recall.
 
 ## 1. Stage A — Static sub-agent
 
-Mỗi nhóm candidate (gom theo *file affinity*, `staticGroupSize=4`) sinh một sub-agent với
-context nhỏ + bộ tool tĩnh giới hạn. Sub-agent chạy tới khi mọi candidate trong nhóm có
-static context rồi gọi `${DONE_STATIC}`.
+Each group of candidates (grouped by *file affinity*, `staticGroupSize=4`)
+spawns one sub-agent with a small context and a restricted set of static tools.
+The sub-agent runs until every candidate in its group has static context, then
+calls `${DONE_STATIC}`.
 
 ### 1.1. System prompt — `staticSubAgentSystemPrompt(repoPath)`
 
 - **File:** `apps/leak-inspector-tui/src/domain/subAgentPrompts.ts:39-54`
-- **Biến nội suy:** `${repoPath}`.
+- **Interpolated variables:** `${repoPath}`.
 
 ```text
 You are a STATIC-ANALYSIS evidence-gathering sub-agent for C/C++ memory leaks.
@@ -140,7 +159,8 @@ When you have run the static tools for EVERY candidate in your list, call `${DON
 
 ### 1.2. User message — `staticSubAgentUserMessage(bundles)`
 
-- **File:** `subAgentPrompts.ts:56-63` (mỗi candidate theo `candidateList`, `:28-35`).
+- **File:** `subAgentPrompts.ts:56-63` (one line per candidate, via
+  `candidateList`, `:28-35`).
 
 ```text
 Gather static evidence for these ${N} candidate allocation site(s):
@@ -150,22 +170,25 @@ Gather static evidence for these ${N} candidate allocation site(s):
 Run the static tools for each, then call ${DONE_STATIC}.
 ```
 
-### 1.3. Tool phát cho model (Stage A)
+### 1.3. Tools exposed to the model (Stage A)
 
-`workflowInvestigation.ts:199-203`. Mô tả từng tool xem [§5](#5-mô-tả-tool-gửi-cho-model).
-- **5 tool tĩnh content-capable**: `candidateScan`, `astScan`, `functionSummary`,
-  `pathConstraints`, `ownershipConventions` — đây là **toàn bộ** tool tĩnh được phơi ra cho
-  model (lọc bởi `CONTENT_CAPABLE_TOOLS`, `mcpToolPlan.ts:103-109`). 6 tool tĩnh còn lại
-  (`indexFiles`, `callGraph`, `interproceduralFlow`, `ownershipSummary`, `scanBuildRun`,
-  `scanBuildGetReport`) **bị loại** vì cần mount filesystem chung → giữ analyzer stateless,
-  deploy được từ xa.
-- `read_file` (xem [§5](#read_file--done-tool)).
-- `done_static` — terminal tool kết thúc vòng lặp.
+`workflowInvestigation.ts:199-203`. For each tool's description see
+[§5](#5-tool-descriptions-sent-to-the-model).
 
-### 1.4. Completion nudge (chèn làm user message khi model định dừng sớm)
+- **The five content-capable static tools**: `candidateScan`, `astScan`,
+  `functionSummary`, `pathConstraints`, `ownershipConventions`. These are **all**
+  the static tools exposed to the model (filtered by `CONTENT_CAPABLE_TOOLS`,
+  `mcpToolPlan.ts:103-109`). The other six static tools (`indexFiles`,
+  `callGraph`, `interproceduralFlow`, `ownershipSummary`, `scanBuildRun`,
+  `scanBuildGetReport`) are **excluded** because they need a shared filesystem
+  mount; leaving them out keeps the analyzer stateless and remotely deployable.
+- `read_file` (see [§5](#read_file-and-the-done-tools)).
+- `done_static` — the terminal tool that ends the loop.
 
-- **File:** `workflowInvestigation.ts:211-216` (guard `checkCompletion`, gọi từ
-  `agent-core/loop.ts:168-177`, tối đa `maxStopNudges`).
+### 1.4. Completion nudge (injected as a user message when the model stops early)
+
+- **File:** `workflowInvestigation.ts:211-216` (the `checkCompletion` guard,
+  called from `agent-core/loop.ts:168-177`, at most `maxStopNudges` times).
 
 ```text
 You stopped, but ${N} candidate(s) have NO static evidence yet: ${ids}. Run functionSummary/pathConstraints/astScan/ownershipConventions for them, then call ${DONE_STATIC}. Only tool calls advance the work.
@@ -175,25 +198,29 @@ You stopped, but ${N} candidate(s) have NO static evidence yet: ${ids}. Run func
 
 ## 2. Stage B — Dynamic worker
 
-Chạy **song song** với Stage A. Chỉ bật khi `dynamicMode ≠ off` **và** có `dynamicClient`
-(`workflowInvestigation.ts:127`). Có **hai nhánh**:
+Runs **concurrently** with Stage A. It is enabled only when `dynamicMode ≠ off`
+**and** a `dynamicClient` is available (`workflowInvestigation.ts:127`). There
+are **two branches**.
 
-### 2.1. Nhánh tất định (KHÔNG LLM) — `runDeterministicDynamic`
+### 2.1. The deterministic branch (NO LLM) — `runDeterministicDynamic`
 
 - **File:** `apps/leak-inspector-tui/src/domain/dynamicEvidence.ts:234-274`.
-- Khi case mang sẵn `buildCommand` (vd quy ước Juliet `make CC=clang CXX=clang++`), Stage B
-  chạy **công thức cố định** `buildTarget(buildCommand) → lsanRun(a.out)` — **không prompt
-  LLM** — để run (và do đó coverage/verdict) tái lập được. Chỉ rớt sang worker LLM khi build
-  thất bại hoặc không có `buildCommand`.
+- When the case already carries a `buildCommand` (for instance Juliet's
+  convention, `make CC=clang CXX=clang++`), Stage B runs the **fixed recipe**
+  `buildTarget(buildCommand) → lsanRun(a.out)` with **no LLM prompt**, so the run
+  — and therefore the coverage and the verdict — is reproducible. It falls back
+  to the LLM worker only when the build fails or no `buildCommand` exists.
 - **Notice:** `Stage B · dynamic evidence: deterministic recipe (buildTarget → lsanRun, no LLM)`
-  (`:236`); nếu hỏng: `Stage B · deterministic recipe produced no run — falling back to the LLM worker` (`:251`).
-- Khi `toolSelect=false`, nhánh deterministic recipe skip worker LLM: `Stage B · deterministic recipe produced no run — tool_selector off, skipping LLM worker` (`:248-249`).
+  (`:236`); on failure: `Stage B · deterministic recipe produced no run — falling back to the LLM worker` (`:251`).
+- With `toolSelect=false` the deterministic branch skips the LLM worker entirely:
+  `Stage B · deterministic recipe produced no run — tool_selector off, skipping LLM worker` (`:248-249`).
 
 ### 2.2. System prompt — `dynamicWorkerSystemPrompt(repoPath, buildCommand?)`
 
 - **File:** `subAgentPrompts.ts:67-78`
-- **Biến nội suy:** `${repoPath}`; dòng `A hint build command was provided: …` **chỉ** xuất
-  hiện khi có `buildCommand`.
+- **Interpolated variables:** `${repoPath}`; the line
+  `A hint build command was provided: …` appears **only** when a `buildCommand`
+  exists.
 
 ```text
 You are a DYNAMIC-ANALYSIS sub-agent for C/C++ memory leaks. Build the project ONCE with a sanitizer, run it under a sanitizer, then call `${DONE_DYNAMIC}`.
@@ -206,32 +233,35 @@ The system CAPTURES every finding from your sanitizer runs AUTOMATICALLY and att
 Build at most ONCE and run each dynamic tool at most once. If a build or sanitizer fails twice, stop and call `${DONE_DYNAMIC}`. When a sanitizer has run, call `${DONE_DYNAMIC}`. Do NOT reply with prose.
 ```
 
-> Đây chính là chỗ "model biết lệnh build": worker **tự `read_file` Makefile/CMake** rồi tự
-> chọn lệnh `buildTarget` clang+sanitizer; `buildCommand` discovery chỉ là **gợi ý**.
+> This is where "the model learns the build command": the worker **reads the
+> Makefile or CMake file itself** and then chooses its own clang-plus-sanitizer
+> `buildTarget` command. The discovered `buildCommand` is only a **hint**.
 
 ### 2.3. User message — `dynamicWorkerUserMessage(bundles)`
 
-- **File:** `subAgentPrompts.ts:80-90` (liệt kê tối đa 100 candidate).
+- **File:** `subAgentPrompts.ts:80-90` (lists at most 100 candidates).
 
 ```text
 Run a sanitizer once over the build that covers these ${N} candidate(s):
 - ${bundleId} — ${function}() at ${file}:${line} (${allocation_type})
 …
-… and ${N-100} more.        # chỉ khi N > 100
+… and ${N-100} more.        # only when N > 100
 
 Build once, run a sanitizer (the system captures the findings), then call ${DONE_DYNAMIC}.
 ```
 
-### 2.4. Tool phát cho model (Stage B)
+### 2.4. Tools exposed to the model (Stage B)
 
-`workflowInvestigation.ts:262-266`: **9 tool động** (xem [§5](#dynamic-analyzer-9-tool)) bọc
-trong `withDynamicEvidenceCapture` (finding được bắt tự động — `record_evidence` **cố tình
-không** có trong toolset) + `read_file` + `done_dynamic`. `maxTurns` của worker = `maxTurns + 10`.
+`workflowInvestigation.ts:262-266`: the **nine dynamic tools** (see
+[§5](#dynamic-analyzer-nine-tools)) wrapped in `withDynamicEvidenceCapture`, so
+findings are captured automatically — `record_evidence` is **deliberately
+absent** from the toolset — plus `read_file` and `done_dynamic`. The worker's
+`maxTurns` is `maxTurns + 10`.
 
 ### 2.5. Completion nudge
 
-- **File:** `workflowInvestigation.ts:275-278` (không cho worker dừng trước khi có một
-  sanitizer run thành công).
+- **File:** `workflowInvestigation.ts:275-278` (prevents the worker stopping
+  before one sanitizer run has succeeded).
 
 ```text
 No successful sanitizer run yet. buildTarget (with a sanitizer flag), then run lsanRun/asanRun/valgrindMemcheck, then call ${DONE_DYNAMIC}. Only tool calls advance the work.
@@ -239,25 +269,28 @@ No successful sanitizer run yet. buildTarget (with a sanitizer flag), then run l
 
 ### 2.6. Stage B2 — Targeted harness worker (opt-in, off by default)
 
-- **Gate:** `workflow.targetedHarness.enabled` (mặc định `false` — bật qua
-  `cleak config set workflow.targetedHarness.enabled true` hoặc `--harness`) VÀ phải có
-  `ctx.buildCommand`. Chỉ chạy cho candidate mà static context + Stage B whole-binary vẫn
-  borderline (`needsTargetedDynamic`, `workflowInvestigation.ts:337`), tối đa
-  `maxHarnessesPerScan` (mặc định 5), concurrency `harnessCfg.concurrency` (mặc định 2).
-  Borderline bundle được ưu tiên trước CONFIRMED_LEAK cần double-check
-  (`workflowInvestigation.ts:341`, cờ `verifyConfirmedLeaks`).
+- **Gate:** `workflow.targetedHarness.enabled` (default `false`; enable with
+  `cleak config set workflow.targetedHarness.enabled true` or `--harness`) AND a
+  `ctx.buildCommand` must exist. It runs only for candidates that static context
+  plus Stage B's whole-binary run still leave borderline
+  (`needsTargetedDynamic`, `workflowInvestigation.ts:337`), at most
+  `maxHarnessesPerScan` of them (default 5), at concurrency
+  `harnessCfg.concurrency` (default 2). Borderline bundles are prioritised ahead
+  of CONFIRMED_LEAK bundles queued for a double check
+  (`workflowInvestigation.ts:341`, flag `verifyConfirmedLeaks`).
 - **System prompt:** `harnessWorkerSystemPrompt(repoPath, buildCommand, analyzerProjectPath)` —
   `domain/subAgentPrompts.ts:101-144`.
 - **User message:** `harnessWorkerUserMessage(bundle, staticCtx, suggestedClosureFiles)` —
-  `domain/subAgentPrompts.ts:151-174`. `suggestedClosureFiles` là gợi ý **tất định** từ một
-  `interproceduralFlow` call tính **một lần cho cả scan** (không phải LLM tool call,
-  `workflowInvestigation.ts:349-350,362-380`) — worker vẫn tự quyết có dùng hay không.
-- **Tool phát cho model:** `buildHarness`, `lsanRun`, `asanRun` (bọc
-  `withDynamicEvidenceCapture`), `read_file`, `done_harness`
+  `domain/subAgentPrompts.ts:151-174`. `suggestedClosureFiles` is a
+  **deterministic** hint from a single `interproceduralFlow` call computed **once
+  per scan** (not an LLM tool call; `workflowInvestigation.ts:349-350,362-380`);
+  the worker still decides whether to use it.
+- **Tools exposed to the model:** `buildHarness`, `lsanRun`, `asanRun` (wrapped
+  in `withDynamicEvidenceCapture`), `read_file`, `done_harness`
   (`workflowInvestigation.ts:382-394`).
 - **maxTurns:** `min(cfg.maxTurns, 12)` (`:400`).
-- **Completion nudge** (chèn khi model định dừng trước khi có sanitizer run thành công,
-  `:402-405`):
+- **Completion nudge** (injected when the model tries to stop before a sanitizer
+  run has succeeded, `:402-405`):
 
 ```text
 No sanitizer run yet for this harness. Call buildHarness, then lsanRun/asanRun on the returned binaryPath, then call done_harness. Only tool calls advance the work.
@@ -306,43 +339,52 @@ Tools:
 Call buildHarness at most ONCE, then run one sanitizer on the result. If buildHarness fails for a reason other than harness_unresolvable, you may fix the harness source and try ONE more time. When a sanitizer has run (or the harness is unresolvable), call `done_harness`. Do NOT reply with prose — only tool calls advance the work.
 ````
 
-> **Sau worker — leo thang fuzz tất định, KHÔNG thêm LLM turn** (`workflowInvestigation.ts:413-443`):
-> nếu single-shot run "sạch" nhưng bundle vẫn borderline VÀ có `libfuzzerRun` tool, hệ thống tự
-> build lại harness đã có với `entryStyle="fuzzer"` và chạy `fuzzBudgetMs` (mặc định 15s) — tái
-> dùng chính xác input harness worker đã viết, không hỏi lại model.
+> **After the worker comes a deterministic fuzz escalation with NO extra LLM
+> turn** (`workflowInvestigation.ts:413-443`): if the single-shot run came back
+> clean but the bundle is still borderline AND a `libfuzzerRun` tool is
+> available, the system rebuilds the existing harness itself with
+> `entryStyle="fuzzer"` and runs it for `fuzzBudgetMs` (default 15s), reusing
+> exactly the harness the worker wrote without asking the model again.
 
 ---
 
-## 3. Stage D — Judge (LLM, chỉ cho bundle borderline)
+## 3. Stage D — Judge (LLM, borderline bundles only)
 
-Heuristic chấm **mọi** bundle trước (`heuristicVerdict`, `workflowInvestigation.ts:299-303`).
-Chỉ những bundle **borderline / mâu thuẫn** mới được đẩy lên LLM; phần còn lại giữ verdict
-heuristic.
+The heuristic scores **every** bundle first (`heuristicVerdict`,
+`workflowInvestigation.ts:299-303`). Only **borderline or contradictory**
+bundles are escalated to the LLM; the rest keep their heuristic verdict.
 
-### 3.1. Cổng leo thang — bundle nào lên LLM
+### 3.1. The escalation gate — which bundles reach the LLM
 
-- **`isBorderline`** — `apps/leak-inspector-tui/src/domain/llmJudge.ts:654`: verdict
-  `likely_leak`/`uncertain`, **hoặc** `confidence ∈ [0.35, 0.7]`.
-- **`shouldEscalate`** — `llmJudge.ts:672`: `isBorderline`, **hoặc** mâu thuẫn
-  static↔verdict / dynamic↔verdict (vd cờ leak nhưng dynamic chạy sạch; không cờ nhưng có
-  runtime leak tương quan; verdict nghịch `deriveFusion`). Đây là chỗ tái-kích-hoạt consensus
-  khi nó cần nhất.
+- **`isBorderline`** — `apps/leak-inspector-tui/src/domain/llmJudge.ts:654`: a
+  verdict of `likely_leak` or `uncertain`, **or** `confidence ∈ [0.35, 0.7]`.
+- **`shouldEscalate`** — `llmJudge.ts:672`: `isBorderline`, **or** a
+  contradiction between static evidence and the verdict, or between dynamic
+  evidence and the verdict (for example flagged as a leak although the dynamic
+  run was clean; not flagged although a correlated runtime leak exists; a verdict
+  that contradicts `deriveFusion`). This is where consensus is re-enabled exactly
+  when it matters most.
 
-### 3.2. System prompt — `SYSTEM_PROMPT` (+ `BATCH_SYSTEM_PROMPT`)
+### 3.2. System prompt — `SYSTEM_PROMPT` (and `BATCH_SYSTEM_PROMPT`)
 
 - **File:** `llmJudge.ts:51` (`SYSTEM_PROMPT`)
-- **Định dạng output:** **JSON only** (không native tool-calling; `tools: []`).
-- **Batch judging (mặc định, mọi call Stage D — cả single-shot lẫn consensus):** thay vì 1 call
-  LLM/bundle, N bundle borderline được **gộp vào 1 call** (`judgeBundlesBatched`,
-  `llmJudge.ts:482`), trả về **JSON ARRAY** N verdict thay vì 1 object — dùng
-  `BATCH_SYSTEM_PROMPT` (`llmJudge.ts:61`) thay `SYSTEM_PROMPT`. Hai prompt chia sẻ **y nguyên**
-  bộ luật calibration (`CALIBRATION_RULES`, `llmJudge.ts:34`) — chỉ khác phần mô tả định dạng
-  output (object đơn vs array N phần tử). Batch tối đa `JUDGE_BATCH_SIZE = 12` candidate/call
-  (`llmJudge.ts:369`) — đủ lớn để khấu hao chi phí cố định ~960 token của system prompt (đo
-  thực tế trên 1 case libsolv: 738 candidate → 738+ call riêng lẻ trước khi có batching), đủ nhỏ
-  để tránh "lost in the middle" và giới hạn thiệt hại nếu 1 response bị cắt/hỏng. Lý do ra đời:
-  chi phí thực tế trên project thật (LAMeD) đến từ **số lượng call**, không phải kích thước mỗi
-  call — batching cắt trực tiếp vào nguyên nhân đó thay vì tối ưu prompt từng call.
+- **Output format:** **JSON only** (no native tool-calling; `tools: []`).
+- **Batch judging** (the default for every Stage D call, single-shot and
+  consensus alike): instead of one LLM call per bundle, N borderline bundles are
+  **merged into one call** (`judgeBundlesBatched`, `llmJudge.ts:482`) that
+  returns a **JSON ARRAY** of N verdicts rather than one object, using
+  `BATCH_SYSTEM_PROMPT` (`llmJudge.ts:61`) in place of `SYSTEM_PROMPT`. The two
+  prompts share the **identical** calibration rules (`CALIBRATION_RULES`,
+  `llmJudge.ts:34`) and differ only in how they describe the output format (a
+  single object versus an N-element array). A batch holds at most
+  `JUDGE_BATCH_SIZE = 12` candidates per call (`llmJudge.ts:369`): large enough
+  to amortise the system prompt's fixed cost of roughly 960 tokens (measured on
+  one libsolv case, 738 candidates meant 738 separate calls before batching
+  existed), small enough to avoid "lost in the middle" and to bound the damage if
+  one response is truncated or malformed. The motivation: on real projects
+  (LAMeD) the cost is driven by the **number of calls**, not the size of each
+  one, so batching attacks the actual cause rather than tuning individual
+  prompts.
 
 ```text
 You are an expert C/C++ memory-leak analyst. Decide whether ONE allocation is a real leak, using the code, static context, and any runtime evidence provided.
@@ -360,30 +402,39 @@ Calibrate using the EVIDENCE, in this priority order:
 - Control flow is concrete, not hypothetical: a constant or scaffolding global such as `if(1)`/`if(0)` or `globalReturnsTrue()` does NOT change between two checks in the SAME function — `if(1)` always runs and `if(0)` is dead code. If the buffer is freed under the same condition it was allocated (or in the `else` of a constant `if`), it IS freed. Do NOT call a leak just because the `free()` sits in a different block, behind a constant condition, or after a `break`/in a second loop — trace whether it actually executes.
 ```
 
-> **Thay đổi so với phiên bản đầu** (đã đồng bộ với code hiện tại — bản trước của mục này trong
-> tài liệu bị lệch khỏi code, xem audit phiên làm việc gắn với việc sửa mục này):
-> (1) Bullet CLEAN sanitizer/valgrind được viết lại chặt hơn — trước đây "clean run EXERCISED
-> allocation này" coi là exculpation mạnh; nay chỉ exculpate khi evidence entry **CORRELATED**
-> với đúng candidate này (`llmJudge.ts:615`, ghi chú "task-5 class-(b) hardening" — clean
-> run chỉ cover cùng FILE nhưng khác site KHÔNG được tính là đã "exercise" allocation này, tránh
-> exculpate nhầm các allocation UNPAIRED).
-> (2) Bullet UNPAIRED alloc→free (mới, trước đây không có trong tài liệu): static pairing đánh
-> dấu UNPAIRED là tín hiệu leak MẠNH — không được gạt bỏ bằng narrative ownership-transfer trừ
-> khi snippet code thực sự cho thấy pointer được return/store/hand-off; khi UNPAIRED và bằng
-> chứng phản bác chỉ là 1 dynamic run "sạch" mơ hồ → mặc định `likely_leak`, không phải
-> `false_positive`.
-> (3) Cuối bullet PATH-SENSITIVE: "Ownership transferring on success does not cover the error path that loses the object." — nhấn mạnh rằng ownership transfer chỉ bao phủ success path, không bao phủ error path làm mất object.
-> (4) Bullet PARAMETER-ownership được mở rộng với "The parameter has no allocation site in the function; judge it by the conditional free + the reachable un-freed exit." — làm rõ rằng parameter không có allocation site trong function, judge dựa trên conditional free + reachable un-freed exit.
+> **Changes since the first version of this document** (now in sync with the
+> code; the earlier text of this section had drifted):
+> (1) The CLEAN sanitizer/valgrind bullet was tightened. It used to treat "a
+> clean run that EXERCISED this allocation" as strong exculpation; it now
+> exculpates only when the evidence entry is **CORRELATED** to this exact
+> candidate (`llmJudge.ts:615`, the "task-5 class-(b) hardening" note), so a
+> clean run that merely covered the same FILE at a different site no longer
+> counts as having exercised this allocation and cannot wrongly clear an
+> UNPAIRED one.
+> (2) The UNPAIRED alloc→free bullet is new: a static pairing marked UNPAIRED is
+> a STRONG leak signal and must not be dismissed with an ownership-transfer
+> narrative unless the snippet actually shows the pointer being returned,
+> stored or handed off; when the only counter-evidence is one ambiguous clean
+> dynamic run, the default is `likely_leak`, not `false_positive`.
+> (3) The PATH-SENSITIVE bullet gained its closing sentence, "Ownership
+> transferring on success does not cover the error path that loses the object."
+> (4) The PARAMETER-ownership bullet gained "The parameter has no allocation site
+> in the function; judge it by the conditional free + the reachable un-freed
+> exit."
 
 ### 3.3. User message
 
-- **File:** `buildJudgeUserMessage` (`llmJudge.ts:332`, single-bundle — dùng khi 1 batch chỉ có 1
-  candidate) / `buildBatchUserMessage` (`llmJudge.ts:383`, N candidate — mỗi candidate 1 khối
-  `── CANDIDATE i (id: ...) ──` nối liền, cùng dùng lại y nguyên `sourceSnippet` /
-  `summarizeStatic` / `summarizeEvidence` — batching chỉ đổi wire-format, không đổi nội dung
-  mỗi candidate thấy). `${sourceSnippet}` = **toàn bộ hàm bao** quanh allocation (đã **xoá
-  comment** để không lộ nhãn benchmark; cửa sổ dự phòng ±(6,5) dòng, `judge-shared.ts:95`).
-  `${summarizeStatic}` và `${summarizeEvidence}` dựng từ static context / dynamic evidence.
+- **File:** `buildJudgeUserMessage` (`llmJudge.ts:332`, single bundle, used when
+  a batch holds only one candidate) and `buildBatchUserMessage`
+  (`llmJudge.ts:383`, N candidates, each as a
+  `── CANDIDATE i (id: ...) ──` block concatenated together, reusing
+  `sourceSnippet` / `summarizeStatic` / `summarizeEvidence` unchanged, so
+  batching changes the wire format and not what each candidate shows).
+  `${sourceSnippet}` is the **whole enclosing function** around the allocation,
+  with **comments stripped** so benchmark labels cannot leak; the fallback window
+  is ±(6,5) lines (`judge-shared.ts:95`). `${summarizeStatic}` and
+  `${summarizeEvidence}` are built from the static context and the dynamic
+  evidence.
 
 ```text
 ALLOCATION SITE: ${function}() at ${file}:${line} (${allocation_type})
@@ -394,94 +445,107 @@ ${sourceSnippet}
 ```
 
 STATIC ANALYSIS CONTEXT:
-${summarizeStatic}        # Ownership · Alloc→free pairing · Feasible leak paths (hoặc fallback đếm alloc/free/early-return)
+${summarizeStatic}        # Ownership · alloc→free pairing · feasible leak paths (or a fallback count of allocs/frees/early returns)
 
 DYNAMIC EVIDENCE (${N}):
-${summarizeEvidence}      # mỗi finding: tool:kind bytes/blocks @ site [LINKED | same file, different site | CLEAN]; hoặc "(none)"
+${summarizeEvidence}      # per finding: tool:kind bytes/blocks @ site [LINKED | same file, different site | CLEAN]; or "(none)"
 
-PROJECT OWNERSHIP CONVENTIONS (respect these — they encode how THIS project manages memory):   # CHỈ khi có — ownershipNotes do allocator-profiler (§0.5.1) khám phá
-- <vd: "cJSON_Delete bỏ qua chuỗi gắn cJSON_StringIsConst"; "cJSON_Add*ToObject chuyển sở hữu cho parent">
+PROJECT OWNERSHIP CONVENTIONS (respect these — they encode how THIS project manages memory):   # ONLY when present — ownershipNotes discovered by the allocator profiler (§0.5.1)
+- <e.g. "cJSON_Delete skips strings flagged cJSON_StringIsConst"; "cJSON_Add*ToObject transfers ownership to the parent">
 
 Return your JSON verdict.
 ```
 
-### 3.4. Parse + làm giàu
+### 3.4. Parsing and enrichment
 
-- **Single-object parse** — `parseVerdict` (`llmJudge.ts:202`): `JSON.parse`, fallback regex
-  `/\{[\s\S]*\}/`; chỉ nhận nếu `verdict` là 1 trong 5 nhãn hợp lệ (`isLeakVerdictString`),
-  `confidence` clamp `[0,1]`; hỏng → `null` → giữ verdict heuristic.
-- **Batch-array parse** — `parseBatchVerdicts` (`llmJudge.ts:278`): kỳ vọng 1 JSON **array** N
-  phần tử, khớp lại từng item với `expectedIds` qua field `id` (khớp theo `id` nếu có, fallback
-  theo **vị trí**) — 1 item hỏng/thiếu chỉ mất verdict của **đúng candidate đó**, N-1 candidate
-  còn lại vẫn được xử lý bình thường (tránh 1 lỗi nhỏ làm hỏng cả batch). **Fallback NDJSON**
-  (`extractJsonObjects`, `llmJudge.ts:229`): nếu response không phải `[...]` hợp lệ, quét toàn
-  văn bản theo độ sâu ngoặc `{}` (bỏ qua ngoặc/dấu phẩy nằm trong chuỗi) để tách từng object JSON
-  độc lập bất kể có ngăn cách bằng dấu phẩy/xuống dòng/định dạng đẹp hay không — phát sinh từ
-  quan sát thực tế: model `mimo-v2.5` (qua endpoint `opencode-go-2`) trả về **1 object JSON mỗi
-  dòng** (NDJSON) thay vì mảng dù `BATCH_SYSTEM_PROMPT` yêu cầu rõ; không có fallback này thì
-  **toàn bộ batch bị vứt bỏ về heuristic** dù nội dung model trả lời đúng và đủ (đã tái hiện lỗi
-  này với dữ liệu response thật, xác nhận bằng test).
-- Verdict hợp lệ (từ cả 2 đường parse) chạy qua `enrichLeakVerdict`
-  (`@cleak/common/analysis/heuristic-judge`) để gắn `rootCause` + repair diff source-anchored.
+- **Single-object parse** — `parseVerdict` (`llmJudge.ts:202`): `JSON.parse`,
+  falling back to the regex `/\{[\s\S]*\}/`. A result is accepted only if
+  `verdict` is one of the five valid labels (`isLeakVerdictString`), and
+  `confidence` is clamped to `[0,1]`. A failure yields `null`, which keeps the
+  heuristic verdict.
+- **Batch-array parse** — `parseBatchVerdicts` (`llmJudge.ts:278`): expects one
+  JSON **array** of N elements and matches each item back to `expectedIds` via
+  its `id` field (by `id` when present, otherwise by **position**). One malformed
+  or missing item costs only **that candidate's** verdict; the other N-1 are
+  processed normally, so a small error cannot spoil a whole batch. There is an
+  **NDJSON fallback** (`extractJsonObjects`, `llmJudge.ts:229`): when the
+  response is not a valid `[...]`, the text is scanned by brace depth (ignoring
+  braces and commas inside strings) to split out each standalone JSON object,
+  whatever the separators or pretty-printing. This came from an observation in
+  practice: the `mimo-v2.5` model (via the `opencode-go-2` endpoint) returned
+  **one JSON object per line** instead of an array, despite
+  `BATCH_SYSTEM_PROMPT` asking explicitly for one. Without the fallback the
+  **entire batch fell back to the heuristic** even though the model's answer was
+  correct and complete. The failure was reproduced from real response data and is
+  covered by a test.
+- A valid verdict from either parse path is passed through `enrichLeakVerdict`
+  (`@cleak/common/analysis/heuristic-judge`) to attach a `rootCause` and a
+  source-anchored repair diff.
 
 ---
 
-## 4. Batch judging + Consensus judge (tuỳ chọn — đóng góp luận văn)
+## 4. Batch judging and the consensus judge (optional)
 
-### 4.1. Batch judging (mọi lần Stage D chạy, kể cả `CONSENSUS_N = 1`)
+### 4.1. Batch judging (every Stage D run, including `CONSENSUS_N = 1`)
 
-Bundle borderline không còn được judge **từng cái một** — chúng được gom theo lô tối đa
-`JUDGE_BATCH_SIZE = 12` (`llmJudge.ts:369`) và gửi trong **1 call** (`judgeBundlesBatched`,
-`llmJudge.ts:482`), song song hoá theo `cfg.workflow.judgeConcurrency` (`stageHybridJudge`,
-`workflowInvestigation.ts:623-640`). Cache-check chạy **trước** khi gom lô — bundle cache-hit
-không tốn 1 slot nào trong batch. Lý do: đo thực tế trên 1 case libsolv (project thật) cho thấy
-738 candidate borderline ⇒ 738+ call LLM riêng lẻ ở baseline cũ; batching đưa con số đó xuống 34
-call (giảm ~21.7×) với **cùng độ chính xác** trên Juliet CWE-401 (P/R/F1 = 1.000, không regression).
+Borderline bundles are no longer judged **one at a time**. They are grouped into
+batches of at most `JUDGE_BATCH_SIZE = 12` (`llmJudge.ts:369`) and sent in **one
+call** (`judgeBundlesBatched`, `llmJudge.ts:482`), parallelised by
+`cfg.workflow.judgeConcurrency` (`stageHybridJudge`,
+`workflowInvestigation.ts:623-640`). The cache check runs **before** batching, so
+a cache-hit bundle never occupies a slot. The motivation: one real-project case
+(libsolv) had 738 borderline candidates, which meant 738 separate LLM calls under
+the old baseline; batching brought that to 34 calls, a factor of about 21.7, at
+**the same accuracy** on Juliet CWE-401 (P/R/F1 = 1.000, no regression).
 
-### 4.2. Consensus (bật khi `CONSENSUS_N > 1`) — batch theo ROUND
+### 4.2. Consensus (enabled when `CONSENSUS_N > 1`) — batched by ROUND
 
-**Không có prompt riêng** cho consensus — nó tái dùng y nguyên `BATCH_SYSTEM_PROMPT` §3.2 (không
-phải `SYSTEM_PROMPT` đơn-bundle). Trước đây consensus gọi `judgeBundleWithLlm` N lần **cho từng
-bundle riêng** (N×số-bundle call); giờ `judgeBundlesConsensusBatched`
-(`llmJudge.ts:543`, gọi từ `stageHybridJudge`, `workflowInvestigation.ts:549-600`) lấy mẫu
-**theo ROUND across bundles** thay vì theo bundle:
+Consensus has **no prompt of its own**. It reuses `BATCH_SYSTEM_PROMPT` from §3.2
+verbatim (not the single-bundle `SYSTEM_PROMPT`). It used to call
+`judgeBundleWithLlm` N times **per bundle** (N × bundle-count calls); now
+`judgeBundlesConsensusBatched` (`llmJudge.ts:543`, called from `stageHybridJudge`,
+`workflowInvestigation.ts:549-600`) samples **by ROUND across bundles** instead:
 
-- Vòng `round = 0..N-1`: mọi bundle còn "active" (chưa bị early-stop khoá) được gộp thành các lô
-  ≤ `JUDGE_BATCH_SIZE`, mỗi lô 1 call `judgeBundlesBatched` — đây CHÍNH LÀ "lấy mẫu #round cho
-  các bundle này", không phải logic mới, chỉ là gọi lại hàm batch ở §4.1 tại nhiệt độ
+- For `round = 0..N-1`, every still-active bundle (not yet locked by early stop)
+  is grouped into batches of ≤ `JUDGE_BATCH_SIZE`, one `judgeBundlesBatched` call
+  per batch. That is precisely "sample #round for these bundles"; it is not new
+  logic, just the §4.1 batch function called again at
   `cfg.consensus.temperature`.
-- Nếu `cfg.consensus.earlyStop` bật: sau mỗi round, `isDecisionLocked`
-  (`consensus-judge.ts:257`, không đổi) được áp **cho từng bundle** để loại khỏi tập active —
-  **y hệt** điều kiện dừng sớm của `sampleWithEarlyStop` cũ, chỉ khác là bây giờ nhiều bundle
-  chia sẻ chung 1 call mỗi round thay vì mỗi bundle tự vòng lặp riêng.
-- Kết thúc: `combineVerdicts` + `judgeHeuristically` (đều **không đổi**, `consensus-judge.ts`) gộp
-  N mẫu (hoặc ít hơn nếu early-stop khoá sớm) thành 1 `ConsensusVerdict`/bundle — logic gộp phiếu
-  (§8.4) **giữ nguyên hoàn toàn**, chỉ đường vận chuyển mẫu (transport) thay đổi.
+- With `cfg.consensus.earlyStop` enabled, `isDecisionLocked`
+  (`consensus-judge.ts:257`, unchanged) is applied **per bundle** after each round
+  to drop it from the active set. This is **exactly** the stopping condition of
+  the old `sampleWithEarlyStop`; the only difference is that many bundles now
+  share one call per round instead of each looping on its own.
+- At the end, `combineVerdicts` and `judgeHeuristically` (both **unchanged**, in
+  `consensus-judge.ts`) merge the N samples — fewer if early stop locked a bundle
+  sooner — into one `ConsensusVerdict` per bundle. The vote-merging logic (§8.4)
+  is **entirely unchanged**; only the transport of samples differs.
 
-Chi phí: không có early-stop, tổng call ≈ `N × ceil(số-bundle-borderline / JUDGE_BATCH_SIZE)`
-thay vì `N × số-bundle-borderline` — vd đo thực tế 1 case cJSON (109 candidate, 73 borderline,
-`CONSENSUS_N=3`, earlyStop bật theo config mặc định): chỉ 26 call thật (so với baseline không
-batch sẽ là tối đa 73×3 = 219 call nếu early-stop không bao giờ khoá bundle nào) — 73 bundle
-nhận `ConsensusVerdict` với `samples[]` thật (phân bố 1–3 mẫu/bundle tuỳ lúc early-stop khoá),
-không còn rơi hết về heuristic sau khi fix NDJSON (§3.4).
+Cost: without early stop the total is roughly
+`N × ceil(borderline-bundles / JUDGE_BATCH_SIZE)` calls instead of
+`N × borderline-bundles`. Measured on one cJSON case (109 candidates, 73
+borderline, `CONSENSUS_N=3`, early stop on per the default config): 26 real calls,
+against a non-batched baseline of up to 73×3 = 219 if early stop never locked
+anything. All 73 bundles received a `ConsensusVerdict` with real `samples[]`
+(between 1 and 3 samples each, depending on when early stop locked), rather than
+falling back to the heuristic as they did before the NDJSON fix (§3.4).
 
 ---
 
-## 5. Mô tả tool gửi cho model
+## 5. Tool descriptions sent to the model
 
-Với native tool-calling, `description` của mỗi tool đi vào schema model thấy. Tool MCP được
-nạp qua `loadMcpTools` → `wrapMcpTool` (`agent-core/src/mcp/mcpToolAdapter.ts:39-42`): giữ
-nguyên `description` và `inputSchema` của tool từ xa. Chính sách thực thi
-(`mcpToolPlan.ts:45-56`): tool truy vấn thuần (`CONCURRENCY_SAFE`) read-only + song song,
-timeout 30s; tool nặng (`SERIAL_HEAVY`: build/sanitizer/scan-build) read-only + **tuần tự** +
-**cần phê duyệt (`ask`)**, timeout 300s.
+Under native tool-calling, each tool's `description` goes into the schema the
+model sees. MCP tools are loaded through `loadMcpTools` → `wrapMcpTool`
+(`agent-core/src/mcp/mcpToolAdapter.ts:39-42`), which preserves the remote tool's
+`description` and `inputSchema`. The execution policy
+(`mcpToolPlan.ts:45-56`): pure query tools (`CONCURRENCY_SAFE`) are read-only,
+run in parallel, and time out at 30s; heavy tools (`SERIAL_HEAVY`: build,
+sanitizer, scan-build) are read-only, **serial**, **require approval (`ask`)**,
+and time out at 300s.
 
-> Chi tiết từng tool (input schema, handler, return type, JSON-RPC example, known issues):
-> [MCP-TOOLS.md](./MCP-TOOLS.md) (sections 2.2–2.12).
+### Static analyzer (11 tools) — `apps/static-analyzer/src/mcp/static-mcp-server.ts:38-127`
 
-### Static analyzer (11 tool) — `apps/static-analyzer/src/mcp/static-mcp-server.ts:38-127`
-
-| Tool | `description` (verbatim) | Phơi cho TUI? |
+| Tool | `description` (verbatim) | Exposed to the TUI? |
 |---|---|---|
 | `candidateScan` | *Scan a file for allocation sites (malloc, calloc, realloc, strdup, new). Optionally supply per-project factory allocators / custom deallocators (≈ LAMeD AllocSource/FreeSink) so wrapper-named allocators (e.g. cJSON_Duplicate) become candidates.* | ✅ |
 | `astScan` | *AST-based structural analysis for memory leak patterns* | ✅ |
@@ -495,16 +559,16 @@ timeout 30s; tool nặng (`SERIAL_HEAVY`: build/sanitizer/scan-build) read-only 
 | `scanBuildRun` | *Run the project-level Clang Static Analyzer (scan-build) over the project build* | ❌ |
 | `scanBuildGetReport` | *Retrieve Clang Static Analyzer (scan-build) findings* | ❌ |
 
-> ❌ = bị loại khỏi TUI (cần filesystem mount chung) — `CONTENT_CAPABLE_TOOLS`,
-> `mcpToolPlan.ts:103-109`. Slot `scanBuild*` nay là Clang Static Analyzer (scan-build)
-> self-contained.
+> ❌ = excluded from the TUI (needs a shared filesystem mount) —
+> `CONTENT_CAPABLE_TOOLS`, `mcpToolPlan.ts:103-109`. The `scanBuild*` slot is now
+> a self-contained Clang Static Analyzer (scan-build).
 >
-> **Thay đổi so với bản cũ:** 5 tool — candidateScan, callGraph, functionSummary, interproceduralFlow, pathConstraints — đã được thêm mô tả về extraAllocators/extraDeallocators (≈ LAMeD AllocSource/FreeSink) để engine tất định nhận diện allocator wrapper theo dự án.
+> **Change since the earlier version:** five tools — candidateScan, callGraph,
+> functionSummary, interproceduralFlow, pathConstraints — gained descriptions
+> covering `extraAllocators`/`extraDeallocators` (≈ LAMeD AllocSource/FreeSink)
+> so the deterministic engine can recognise per-project allocator wrappers.
 
-### Dynamic analyzer (9 tool) — `apps/dynamic-analyzer/src/mcp/dynamic-mcp-server.ts:41-93`
-
-> Chi tiết từng tool (input schema, handler, return type, JSON-RPC example, known issues):
-> [MCP-TOOLS.md](./MCP-TOOLS.md) (sections 3.2–3.10).
+### Dynamic analyzer (nine tools) — `apps/dynamic-analyzer/src/mcp/dynamic-mcp-server.ts:41-93`
 
 | Tool | `description` (verbatim) |
 |---|---|
@@ -518,7 +582,7 @@ timeout 30s; tool nặng (`SERIAL_HEAVY`: build/sanitizer/scan-build) read-only 
 | `runBinary` | *Run a binary without instrumentation* |
 | `listRuns` | *List stored dynamic analysis runs* |
 
-### `read_file` + done tool
+### `read_file` and the done tools
 
 | Tool | `description` (verbatim) | File |
 |---|---|---|
@@ -526,75 +590,80 @@ timeout 30s; tool nặng (`SERIAL_HEAVY`: build/sanitizer/scan-build) read-only 
 | `done_static` | *Finish static evidence gathering for this group of candidates.* | `workflowInvestigation.ts:202` |
 | `done_dynamic` | *Finish dynamic evidence collection.* | `workflowInvestigation.ts:265` |
 
-> `read_file` là **tool domain duy nhất** còn dùng. `buildDoneTool` định nghĩa ở
-> `subAgentPrompts.ts:17-26` (no-op, `{done:true}`).
+> `read_file` is the **only remaining domain tool**. `buildDoneTool` is defined
+> in `subAgentPrompts.ts:17-26` (a no-op returning `{done:true}`).
 
 ---
 
-## 6. Notice / placeholder (agent-core — chèn vào hội thoại / hiển thị)
+## 6. Notices and placeholders (agent-core — injected into the conversation or displayed)
 
 - **Compaction notice** — `packages/agent-core/src/loop.ts:103`:
   ```text
   Compacted context: pruned ~${tokens} tokens of stale tool output
   ```
-- **Stop-nudge notice** — `loop.ts:174` (khi model dừng sớm mà `checkCompletion` còn việc):
+- **Stop-nudge notice** — `loop.ts:174` (when the model stops early while
+  `checkCompletion` still has work outstanding):
   ```text
   Agent stopped early — nudging to finish (${stopNudges}/${maxStopNudges})
   ```
-- **Placeholder thay tool-result cũ khi nén context** — `packages/agent-core/src/compaction.ts:66`
-  (prefix `[elided:`, `:17`):
+- **Placeholder replacing an old tool result during compaction** —
+  `packages/agent-core/src/compaction.ts:66` (prefix `[elided:`, `:17`):
   ```text
   [elided: ${n} chars of stale tool output pruned to save context]
   ```
-- **Stage notice** (hiển thị tiến trình, `workflowInvestigation.ts`): `Stage A · static
-  evidence: …` (`:191`), `Stage B · …` (`:225,236,248,251,257`), `Stage C · synthesize: …`
-  (`:296`), `Stage D · judge: …` (`:299,309`).
+- **Stage notices** (progress display, `workflowInvestigation.ts`): `Stage A ·
+  static evidence: …` (`:191`), `Stage B · …` (`:225,236,248,251,257`), `Stage C
+  · synthesize: …` (`:296`), `Stage D · judge: …` (`:299,309`).
 
 ---
 
-## 7. Tham số điều khiển vòng lặp / judge — `apps/leak-inspector-tui/src/config.ts`
+## 7. Loop and judge control parameters — `apps/leak-inspector-tui/src/config.ts`
 
-| Tham số | Mặc định | Env | Dòng |
+| Parameter | Default | Env | Line |
 |---|---|---|---|
-| Turn tối đa mỗi sub-agent | `15` (dynamic worker `+10`) | `AGENT_MAX_TURNS` | `:183` |
-| Idle-timeout stream | `75000` ms | `LLM_IDLE_TIMEOUT_MS` (fallback `LLM_TIMEOUT_MS`) | `:111` |
+| Max turns per sub-agent | `15` (dynamic worker `+10`) | `AGENT_MAX_TURNS` | `:183` |
+| Stream idle timeout | `75000` ms | `LLM_IDLE_TIMEOUT_MS` (falls back to `LLM_TIMEOUT_MS`) | `:111` |
 | `maxStopNudges` | `3` | — | `agent-core/loop.ts` |
-| Consensus N | `1` (opt-in 3/5 cho ablation) | `CONSENSUS_N` | `:196` |
-| Consensus rule | `weighted` (`majority`/`weighted`/`unanimous-to-flag`) | `CONSENSUS_RULE` | `:197` |
+| Consensus N | `1` (opt in to 3 or 5 for the ablation) | `CONSENSUS_N` | `:196` |
+| Consensus rule | `weighted` (`majority` / `weighted` / `unanimous-to-flag`) | `CONSENSUS_RULE` | `:197` |
 | Consensus temperature | `0.7` | `CONSENSUS_TEMPERATURE` | `:199` |
 | Consensus concurrency | `3` | `CONSENSUS_CONCURRENCY` | `:200` |
 | Judge temperature (single) | `0` | `JUDGE_LLM_TEMPERATURE` | `:118` |
 | Static fan-out | `staticConcurrency=3`, `staticGroupSize=4` | `WORKFLOW_STATIC_*` | `:190-191` |
 | Judge concurrency | `3` | `WORKFLOW_JUDGE_CONCURRENCY` | `:192` |
-| Judge batch size | `12` (không cấu hình qua config/env) | — | `llmJudge.ts:369` (`JUDGE_BATCH_SIZE`) |
-| Provider | `local` (`openai`/`anthropic`/`openai-compat`) | `LLM_PROVIDER` + khoá theo provider | `:105-166` |
+| Judge batch size | `12` (not configurable via config or env) | — | `llmJudge.ts:369` (`JUDGE_BATCH_SIZE`) |
+| Provider | `local` (`openai` / `anthropic` / `openai-compat`) | `LLM_PROVIDER` plus the per-provider key | `:105-166` |
 | Compaction threshold tokens | `100000` | `LLM_COMPACT_THRESHOLD_TOKENS` | `:185` |
-| Compaction keep recent turns | `3` | `LLM_COMPACT_KEEP_TURNS` | `:186` |
+| Compaction: recent turns kept | `3` | `LLM_COMPACT_KEEP_TURNS` | `:186` |
 
 ---
 
-## 8. Ranh giới quyết định (decision boundaries)
+## 8. Decision boundaries
 
-Tổng hợp **mọi nơi** output (LLM hoặc heuristic) trở thành "leak / không leak". Đây là tóm tắt
-trỏ về mã; phương pháp đo chi tiết ở [EVALUATION.md](./EVALUATION.md).
+This section collects **every place** an output, whether from the LLM or the
+heuristic, becomes "leak" or "not a leak". It is a summary that points back at
+the code.
 
-### 8.1. Collapse nhãn → boolean (chân lý duy nhất)
+### 8.1. Collapsing labels to a boolean (the single source of truth)
 
-Một site được tính là **leak ⇔ verdict ∈ `{confirmed_leak, likely_leak}`**:
+A site counts as a **leak ⇔ verdict ∈ `{confirmed_leak, likely_leak}`**:
 
 ```ts
 // packages/common/src/analysis/judge-shared.ts:33
 export const LEAK_POSITIVE_VERDICTS: ReadonlySet<string> = new Set(['confirmed_leak', 'likely_leak']);
 ```
 
-`uncertain`, `likely_false_positive`, `false_positive` đều **KHÔNG** flag. Tập này là ranh giới
-nhị phân ở mọi consumer: consensus (`isFlag`, `consensus-judge.ts:66`) và bộ chấm eval
-(`isFlagged`, `evalScoring.ts:79`). **Không có cutoff confidence** ở bất kỳ đâu trên đường dự
-đoán/đo — confidence chỉ dùng cho cân consensus, hiển thị severity và calibration/ECE.
+`uncertain`, `likely_false_positive` and `false_positive` are **not** flagged.
+This set is the binary boundary for every consumer: consensus (`isFlag`,
+`consensus-judge.ts:66`) and the evaluation scorer (`isFlagged`,
+`evalScoring.ts:79`). There is **no confidence cutoff** anywhere on the
+prediction or scoring path; confidence is used only to weight consensus, to
+display severity, and for calibration/ECE.
 
-### 8.2. Heuristic judge (no-LLM, đồng thời là bộ chốt mọi bundle LLM bỏ sót)
+### 8.2. The heuristic judge (no LLM, and the backstop for every bundle the LLM does not see)
 
-`packages/common/src/analysis/heuristic-judge.ts:244-249` — cộng điểm tín hiệu rồi chia băng:
+`packages/common/src/analysis/heuristic-judge.ts:244-249` sums signal scores and
+bands the total:
 
 ```ts
 thresholds: VerdictThresholds = JUDGE_VERDICT_THRESHOLDS,  // { confirmed: 0.7, likely: 0.4 }
@@ -602,50 +671,63 @@ thresholds: VerdictThresholds = JUDGE_VERDICT_THRESHOLDS,  // { confirmed: 0.7, 
 clamped >= thresholds.confirmed ? CONFIRMED_LEAK : clamped >= thresholds.likely ? LIKELY_LEAK : UNCERTAIN
 ```
 
-Cộng/trừ điểm (theo thứ tự ưu tiên trong source `heuristic-judge.ts:64-241`):
-- Runtime leak tương quan `definitely_lost`/`asan_leak`/`indirectly_lost`: `+0.5`
-- Runtime leak tương quan `possibly_lost`: `+0.2`
-- Runtime leak tương quan (kind unknown): `+0.4`
-- Uncorrelated leak (khác site): `skip` (đã sửa bug `+0.15` cũ)
+The score contributions, in the order they appear in the source
+(`heuristic-judge.ts:64-241`):
+
+- Correlated runtime leak, `definitely_lost` / `asan_leak` / `indirectly_lost`: `+0.5`
+- Correlated runtime leak, `possibly_lost`: `+0.2`
+- Correlated runtime leak, kind unknown: `+0.4`
+- Uncorrelated leak (a different site): `skip` (this fixes an earlier `+0.15` bug)
 - Structural "high" missing free: `+0.5`
 - Structural "medium" matched pattern: `+0.25`
-- Alloc→free chưa cặp (unpaired): `+0.25`
+- Unpaired alloc→free: `+0.25`
 - Conditional free (freed on some paths only): `+0.15`
-- No free() in function: `+0.25`
-- Reachable leak path khả thi: `+0.2`
-- scan-build đồng tình: `+0.15`
+- No `free()` in the function: `+0.25`
+- A feasible reachable leak path: `+0.2`
+- scan-build agrees: `+0.15`
 - Path-sensitive leak: `+0.15`
-- Ownership không chuyển ra: `+0.15`
-- Ownership chuyển ra: `−0.25` / `−0.1` nếu có correlated leak
+- Ownership not transferred out: `+0.15`
+- Ownership transferred out: `−0.25`, or `−0.1` when a correlated leak exists
 - Early return: `+0.1`
 - Candidate confidence 'high': `+0.1`
-- freed-via-callee (không có correlated runtime leak): **return `likely_false_positive (0.8)`** ngay
+- Freed via callee with no correlated runtime leak: **returns `likely_false_positive (0.8)`** immediately
 
-Ba **cổng precision** ghi đè kết quả:
-1. **freedViaCallee** (`:222-233`): giao pointer cho callee free → `likely_false_positive (0.8)` (trừ khi có correlated runtime leak).
-2. **Dynamic exculpation** (`:259-267`): dynamic chạy sạch + không decisive static evidence → `likely_false_positive (0.8)`.
-3. **Strong signal gate** (`:274-285`): verdict "flagged" mà **thiếu tín hiệu mạnh** (`correlatedRuntimeLeak || structuralHigh || candidatePair?.status === 'unpaired' || pathSensitiveLeak || hasOwnershipIssue`) bị **hạ xuống `uncertain`**.
+Three **precision gates** can override the result:
 
-### 8.3. LLM judge — rubric, không phải ngưỡng số
+1. **freedViaCallee** (`:222-233`): the pointer is handed to a callee that frees
+   it → `likely_false_positive (0.8)`, unless a correlated runtime leak exists.
+2. **Dynamic exculpation** (`:259-267`): the dynamic run was clean and there is
+   no decisive static evidence → `likely_false_positive (0.8)`.
+3. **Strong-signal gate** (`:274-285`): a "flagged" verdict that **lacks a strong
+   signal** (`correlatedRuntimeLeak || structuralHigh || candidatePair?.status === 'unpaired' || pathSensitiveLeak || hasOwnershipIssue`)
+   is **downgraded to `uncertain`**.
 
-Model tự chọn 1/5 nhãn theo rubric §3.2: runtime-linked ⇒ `confirmed_leak` conf ≥ 0.9;
-ownership transfer / freed-all-paths / clean-run ⇒ `false_positive`. `confidence` model tự gán
-**không** làm cổng flag.
+### 8.3. The LLM judge — a rubric, not a numeric threshold
+
+The model picks one of the five labels according to the §3.2 rubric: a
+runtime-linked leak ⇒ `confirmed_leak` at confidence ≥ 0.9; ownership transfer,
+freed on all paths, or a clean run ⇒ `false_positive`. The `confidence` the model
+assigns is **not** what gates the flag.
 
 ### 8.4. Consensus
 
 `combineVerdicts` (`consensus-judge.ts:159-234`):
-- **Cờ flag** theo luật: `majority` = `flagging*2 > n`; `weighted` = `flagW/total > 0.5` (phiếu
-  **nghịch** bằng chứng dynamic quyết định bị nhân `×0.3`); `unanimous-to-flag` = `flagging === n`.
-- **Nhãn cuối** = verdict modal trong cụm đồng thuận (hoà → chọn **ít nghiêm trọng hơn**).
-- **Veto:** exculpation mạnh của heuristic (`FP`/`likely_FP`, conf ≥ 0.75) **phủ quyết** cờ
-  flag — override chỉ *gỡ* cờ, không *thêm*.
+
+- **The flag** follows the rule in force: `majority` = `flagging*2 > n`;
+  `weighted` = `flagW/total > 0.5`, where a vote that **contradicts** decisive
+  dynamic evidence is multiplied by `×0.3`; `unanimous-to-flag` =
+  `flagging === n`.
+- **The final label** is the modal verdict within the agreeing cluster; a tie
+  resolves to the **less severe** one.
+- **Veto:** a strong heuristic exculpation (`false_positive` or
+  `likely_false_positive` at confidence ≥ 0.75) **vetoes** the flag. The override
+  can only *remove* a flag, never *add* one.
 
 ---
 
-## 9. Bảng tổng hợp (prompt/instruction active)
+## 9. Summary table of active prompts and instructions
 
-| Tầng | Loại | Tên / hàm | File | Dòng | Định dạng |
+| Tier | Kind | Name / function | File | Lines | Format |
 |---|---|---|---|---|---|
 | A | System | `staticSubAgentSystemPrompt` | `domain/subAgentPrompts.ts` | 39-54 | tool-calling |
 | A | User | `staticSubAgentUserMessage` | `domain/subAgentPrompts.ts` | 56-63 | — |
@@ -653,18 +735,18 @@ ownership transfer / freed-all-paths / clean-run ⇒ `false_positive`. `confiden
 | B | System | `dynamicWorkerSystemPrompt` | `domain/subAgentPrompts.ts` | 67-78 | tool-calling |
 | B | User | `dynamicWorkerUserMessage` | `domain/subAgentPrompts.ts` | 80-90 | — |
 | B | Nudge | dynamic completion | `orchestrator/workflowInvestigation.ts` | 275-278 | — |
-| B | (no-LLM) | `runDeterministicDynamic` | `domain/dynamicEvidence.ts` | 234-274 | — |
+| B | (no LLM) | `runDeterministicDynamic` | `domain/dynamicEvidence.ts` | 234-274 | — |
 | B2 | System | `harnessWorkerSystemPrompt` (opt-in) | `domain/subAgentPrompts.ts` | 101-144 | tool-calling |
 | B2 | User | `harnessWorkerUserMessage` | `domain/subAgentPrompts.ts` | 151-174 | — |
 | B2 | Nudge | harness completion | `orchestrator/workflowInvestigation.ts` | 402-405 | — |
-| D | System (đơn-bundle) | `SYSTEM_PROMPT` | `domain/llmJudge.ts` | 51-56 | JSON object |
-| D | System (batch, mọi call) | `BATCH_SYSTEM_PROMPT` | `domain/llmJudge.ts` | 61-67 | JSON array |
+| D | System (single bundle) | `SYSTEM_PROMPT` | `domain/llmJudge.ts` | 51-56 | JSON object |
+| D | System (batch, every call) | `BATCH_SYSTEM_PROMPT` | `domain/llmJudge.ts` | 61-67 | JSON array |
 | D | Caller (single-shot batch) | `judgeBundlesBatched` + `buildBatchUserMessage` | `domain/llmJudge.ts` | 482, 383 | JSON array |
-| D | Caller (consensus, round-batch) | `judgeBundlesConsensusBatched` | `domain/llmJudge.ts` | 543 | JSON array ×N round |
-| D | Parse | `parseVerdict` / `parseBatchVerdicts` (+NDJSON fallback) | `domain/llmJudge.ts` | 202, 278, 229 | — |
+| D | Caller (consensus, round batch) | `judgeBundlesConsensusBatched` | `domain/llmJudge.ts` | 543 | JSON array × N rounds |
+| D | Parse | `parseVerdict` / `parseBatchVerdicts` (+ NDJSON fallback) | `domain/llmJudge.ts` | 202, 278, 229 | — |
 | D | Logic | `isBorderline` / `shouldEscalate` | `domain/llmJudge.ts` | 654, 672 | — |
 | D | Logic | `combineVerdicts` (consensus) | `common/analysis/consensus-judge.ts` | 159-234 | — |
-| — | Tool desc | done tools + `read_file` | `subAgentPrompts.ts` / `readFileTool.ts` | 17-26 / 17-43 | schema |
+| — | Tool desc | done tools and `read_file` | `subAgentPrompts.ts` / `readFileTool.ts` | 17-26 / 17-43 | schema |
 | — | Tool desc ×11 | static MCP | `static-analyzer/src/mcp/static-mcp-server.ts` | 38-127 | schema |
 | — | Tool desc ×9 | dynamic MCP | `dynamic-analyzer/src/mcp/dynamic-mcp-server.ts` | 41-93 | schema |
 | — | Notice | compaction / nudge / elided | `agent-core/src/loop.ts`, `compaction.ts` | 103,174 / 66 | — |
@@ -673,11 +755,11 @@ ownership transfer / freed-all-paths / clean-run ⇒ `false_positive`. `confiden
 
 ---
 
-## 10. Compact summary — tập trung prompt gốc
+## 10. Compact summary — the prompts on their own
 
-### 10.1. Prompt dùng cho STATIC SUB-AGENT (Stage A)
+### 10.1. The STATIC SUB-AGENT prompt (Stage A)
 
-**Mục đích:** Sub-agent gom bằng chứng tĩnh cho từng candidate.
+**Purpose:** the sub-agent gathers static evidence for each candidate.
 
 **File:** `subAgentPrompts.ts:39-54`
 
@@ -696,9 +778,10 @@ Efficiency: you MAY call several of these read-only tools in a SINGLE turn — t
 When you have run the static tools for EVERY candidate in your list, call `done_static`. Do NOT reply with prose — only tool calls advance the work.
 ```
 
-### 10.2. Prompt dùng cho DYNAMIC WORKER (Stage B)
+### 10.2. The DYNAMIC WORKER prompt (Stage B)
 
-**Mục đích:** Worker build project với sanitizer rồi chạy, findings tự động capture.
+**Purpose:** the worker builds the project with a sanitizer and runs it;
+findings are captured automatically.
 
 **File:** `subAgentPrompts.ts:67-78`
 
@@ -713,19 +796,22 @@ The system CAPTURES every finding from your sanitizer runs AUTOMATICALLY and att
 Build at most ONCE and run each dynamic tool at most once. If a build or sanitizer fails twice, stop and call `done_dynamic`. When a sanitizer has run, call `done_dynamic`. Do NOT reply with prose.
 ```
 
-### 10.3. Prompt dùng cho LLM JUDGE (Stage D)
+### 10.3. The LLM JUDGE prompt (Stage D)
 
-**Mục đích:** Judge các allocation borderline, gộp theo lô (batch) tối đa 12 candidate/call,
-output verdict JSON (array nếu batch, object nếu batch chỉ có 1 candidate).
+**Purpose:** judge borderline allocations, batched at up to 12 candidates per
+call, returning a JSON verdict (an array for a batch, an object when the batch
+holds a single candidate).
 
-**File:** `llmJudge.ts:51` (`SYSTEM_PROMPT`, đơn-bundle) / `llmJudge.ts:61` (`BATCH_SYSTEM_PROMPT`, dùng cho mọi call thật kể cả `CONSENSUS_N=1`)
+**File:** `llmJudge.ts:51` (`SYSTEM_PROMPT`, single bundle) and `llmJudge.ts:61`
+(`BATCH_SYSTEM_PROMPT`, used for every real call, including `CONSENSUS_N=1`)
 
-Xem nội dung đầy đủ + changelog tại §3.2 (giữ một bản duy nhất để tránh lệch đồng bộ như bản
-trước của mục này từng bị).
+The full text and its changelog are in §3.2. They are kept in one place only, so
+this section cannot drift out of sync the way an earlier version of it did.
 
-### 10.4. Prompt dùng cho ALLOCATOR PROFILER (Policy)
+### 10.4. The ALLOCATOR PROFILER prompt (policy tier)
 
-**Mục đích:** Khám phá allocator/deallocator custom của project. One-shot, temp 0.
+**Purpose:** discover the project's custom allocators and deallocators.
+One-shot, temperature 0.
 
 **File:** `allocatorProfiler.ts:90-103`
 
@@ -744,9 +830,10 @@ Rules:
 - Precision over recall: if unsure a name is an allocator/deallocator, OMIT it.
 ```
 
-### 10.5. Prompt dùng cho STRATEGIST (Policy)
+### 10.5. The STRATEGIST prompt (policy tier)
 
-**Mục đích:** Chọn plan analysis (dynamic on/off, judge mode, static depth). One-shot, temp 0.
+**Purpose:** choose an analysis plan (dynamic on or off, judge mode, static
+depth). One-shot, temperature 0.
 
 **File:** `strategist.ts:72-80`
 
@@ -760,9 +847,7 @@ Guidance:
 Be decisive; prefer cheaper plans when they lose no recall.
 ```
 
-### 10.6. Static tool descriptions bảng (5 content-capable tool)
-
-> Chi tiết từng tool: [MCP-TOOLS.md](./MCP-TOOLS.md) (section 2).
+### 10.6. Static tool descriptions (the five content-capable tools)
 
 | Tool | `description` (verbatim) |
 |---|---|
@@ -772,11 +857,12 @@ Be decisive; prefer cheaper plans when they lose no recall.
 | `pathConstraints` | *Analyze path constraints and feasible paths around an allocation. Optionally supply per-project allocators/deallocators so factory allocations are tracked on exit paths.* |
 | `ownershipConventions` | *Detect ownership-transfer conventions in a file* |
 
-Lọc bởi `CONTENT_CAPABLE_TOOLS` (`mcpToolPlan.ts:103-109`). Các tool tĩnh còn lại (indexFiles, callGraph, interproceduralFlow, ownershipSummary, scanBuildRun, scanBuildGetReport) không phơi cho TUI vì cần filesystem mount chung.
+Filtered by `CONTENT_CAPABLE_TOOLS` (`mcpToolPlan.ts:103-109`). The remaining
+static tools (`indexFiles`, `callGraph`, `interproceduralFlow`,
+`ownershipSummary`, `scanBuildRun`, `scanBuildGetReport`) are not exposed to the
+TUI because they require a shared filesystem mount.
 
-### 10.7. Dynamic tool descriptions bảng (9 tool)
-
-> Chi tiết từng tool: [MCP-TOOLS.md](./MCP-TOOLS.md) (section 3).
+### 10.7. Dynamic tool descriptions (nine tools)
 
 | Tool | `description` (verbatim) |
 |---|---|
@@ -790,9 +876,7 @@ Lọc bởi `CONTENT_CAPABLE_TOOLS` (`mcpToolPlan.ts:103-109`). Các tool tĩnh 
 | `runBinary` | *Run a binary without instrumentation* |
 | `listRuns` | *List stored dynamic analysis runs* |
 
-### 10.8. Domain tool (read_file) + done tools
-
-> Chi tiết: [MCP-TOOLS.md](./MCP-TOOLS.md) (section 4).
+### 10.8. The domain tool (`read_file`) and the done tools
 
 | Tool | `description` (verbatim) |
 |---|---|

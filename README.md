@@ -17,14 +17,13 @@ here.
 
 | Path | What it is |
 |---|---|
-| [`PROMPTS.md`](PROMPTS.md) | Every prompt the system sends, by pipeline stage, with the exact output schema each one must satisfy. See the note on language below. |
+| [`PROMPTS.md`](PROMPTS.md) | Every prompt the system sends, by pipeline stage, with the exact output schema each one must satisfy. |
 | [`configs/*.yaml`](configs/) | The nine baseline configurations B1–B7. Their capability flags are unchanged since the reported sweep; only B7's filename and prose description were revised afterwards. |
 
-### A note on language
+### Section map
 
-`PROMPTS.md` is written in Vietnamese, but **the prompt texts it quotes are
-in English, verbatim as sent to the model**. Section numbers are stable, so
-the map below is enough to navigate it without reading the Vietnamese prose.
+Prompt texts are reproduced **verbatim as sent to the model**; the surrounding
+commentary is ours.
 
 | Section | Prompt |
 |---|---|
